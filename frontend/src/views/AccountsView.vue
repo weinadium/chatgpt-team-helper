@@ -1655,7 +1655,7 @@ const handleInviteSubmit = async () => {
                   <Input
                     v-model="formData.token"
                     required
-                    placeholder="sk-proj-..."
+                    placeholder="eyJhbGciOi..."
                     class="h-11 flex-1 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
                   />
                   <Button
