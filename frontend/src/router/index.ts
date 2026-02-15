@@ -82,6 +82,10 @@ const router = createRouter({
       component: RegisterView,
     },
     {
+      path: '/redeem',
+      redirect: '/redeem/common',
+    },
+    {
       path: '/redeem/common',
       name: 'redeem',
       component: RedeemView,

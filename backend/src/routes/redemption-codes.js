@@ -227,312 +227,327 @@ export async function redeemCodeInternal({
     throw new RedemptionError(400, 'Linux DO 渠道兑换需要填写论坛 UID')
   }
 
-  const db = await getDatabase()
-  const codeResult = db.exec(`
-      SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
-             account_email, channel, channel_name, created_at, updated_at,
-             reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-             reserved_for_order_no, reserved_for_order_email, order_type
-      FROM redemption_codes
-      WHERE code = ?
-    `, [sanitizedCode])
-
-  if (codeResult.length === 0 || codeResult[0].values.length === 0) {
-    throw new RedemptionError(404, '兑换码不存在或已失效')
-  }
-
-  const codeRow = codeResult[0].values[0]
-  const codeRecord = mapCodeRow(codeRow)
-  const codeId = codeRecord.id
-  const isRedeemed = codeRecord.isRedeemed
-  const boundAccountEmail = codeRecord.accountEmail
-  const codeChannel = codeRecord.channel
-  const storedChannel = codeRow[6] == null ? '' : String(codeRow[6]).trim().toLowerCase()
-  const isStoredCommonChannel = storedChannel === '' || storedChannel === 'common'
-  const reservedForUid = codeRecord.reservedForUid ? String(codeRecord.reservedForUid).trim() : ''
-  const reservedForEntryId = codeRecord.reservedForEntryId
-  const reservedForOrderNo = codeRecord.reservedForOrderNo ? String(codeRecord.reservedForOrderNo).trim() : ''
-  const reservedForOrderEmail = codeRecord.reservedForOrderEmail ? normalizeEmail(codeRecord.reservedForOrderEmail) : ''
-  let resolvedOrderType = normalizeOrderType(orderType || codeRecord.orderType)
-  const redeemerIdentifier = requestedChannel === 'linux-do' && normalizedRedeemerUid
-    ? `UID:${normalizedRedeemerUid} | Email:${normalizedEmail}`
-    : normalizedEmail
-
-  if (isRedeemed) {
-    throw new RedemptionError(400, '该兑换码已被使用')
-  }
-
-  const fallbackFromCommonChannelAllowed = Boolean(allowCommonChannelFallback)
-    && isStoredCommonChannel
-    && (requestedChannel === 'xhs' || requestedChannel === 'xianyu')
-
-  if (codeChannel !== requestedChannel && !fallbackFromCommonChannelAllowed) {
-    throw new RedemptionError(403, '该兑换码仅能在对应渠道的兑换页使用')
-  }
-
-  if (requestedChannel === 'linux-do' && reservedForUid && reservedForUid !== normalizedRedeemerUid) {
-    throw new RedemptionError(403, '该兑换码已绑定其他 Linux DO 用户')
-  }
-
-  if (reservedForOrderNo) {
-    const orderResult = db.exec(
+  return await withLocks([`redemption-code:redeem:${sanitizedCode}`], async () => {
+    const db = await getDatabase()
+    const codeResult = db.exec(
       `
-        SELECT status, email, refunded_at, order_type
-        FROM purchase_orders
-        WHERE order_no = ?
-        LIMIT 1
+        SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
+               account_email, channel, channel_name, created_at, updated_at,
+               reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
+               reserved_for_order_no, reserved_for_order_email, order_type
+        FROM redemption_codes
+        WHERE code = ?
       `,
-      [reservedForOrderNo]
+      [sanitizedCode]
     )
 
-    const orderRow = orderResult[0]?.values?.[0]
-    if (orderRow) {
-      const orderStatus = String(orderRow[0] || '')
-      const orderEmail = normalizeEmail(orderRow[1])
-      const refundedAt = orderRow[2]
-      const orderTypeFromOrder = orderRow[3]
-      if (orderTypeFromOrder != null && String(orderTypeFromOrder).trim()) {
-        resolvedOrderType = normalizeOrderType(orderTypeFromOrder)
-      }
+    if (codeResult.length === 0 || codeResult[0].values.length === 0) {
+      throw new RedemptionError(404, '兑换码不存在或已失效')
+    }
 
-      if (refundedAt || orderStatus === 'refunded') {
-        throw new RedemptionError(403, '该订单已退款，兑换码已失效')
-      }
+    const codeRow = codeResult[0].values[0]
+    const codeRecord = mapCodeRow(codeRow)
+    const codeId = codeRecord.id
+    const isRedeemed = codeRecord.isRedeemed
+    const boundAccountEmail = codeRecord.accountEmail
+    const codeChannel = codeRecord.channel
+    const storedChannel = codeRow[6] == null ? '' : String(codeRow[6]).trim().toLowerCase()
+    const isStoredCommonChannel = storedChannel === '' || storedChannel === 'common'
+    const reservedForUid = codeRecord.reservedForUid ? String(codeRecord.reservedForUid).trim() : ''
+    const reservedForEntryId = codeRecord.reservedForEntryId
+    const reservedForOrderNo = codeRecord.reservedForOrderNo ? String(codeRecord.reservedForOrderNo).trim() : ''
+    const reservedForOrderEmail = codeRecord.reservedForOrderEmail ? normalizeEmail(codeRecord.reservedForOrderEmail) : ''
+    let resolvedOrderType = normalizeOrderType(orderType || codeRecord.orderType)
+    const redeemerIdentifier = requestedChannel === 'linux-do' && normalizedRedeemerUid
+      ? `UID:${normalizedRedeemerUid} | Email:${normalizedEmail}`
+      : normalizedEmail
 
-      if (orderStatus !== 'paid') {
-        throw new RedemptionError(403, '该兑换码对应订单未完成支付')
-      }
+    if (isRedeemed) {
+      throw new RedemptionError(400, '该兑换码已被使用')
+    }
 
-      if (reservedForOrderEmail && reservedForOrderEmail !== normalizeEmail(normalizedEmail)) {
-        throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
-      }
+    const fallbackFromCommonChannelAllowed = Boolean(allowCommonChannelFallback)
+      && isStoredCommonChannel
+      && (requestedChannel === 'xhs' || requestedChannel === 'xianyu')
 
-      if (orderEmail && orderEmail !== normalizeEmail(normalizedEmail)) {
-        throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
-      }
-    } else {
-      const creditOrderResult = db.exec(
+    if (codeChannel !== requestedChannel && !fallbackFromCommonChannelAllowed) {
+      throw new RedemptionError(403, '该兑换码仅能在对应渠道的兑换页使用')
+    }
+
+    if (requestedChannel === 'linux-do' && reservedForUid && reservedForUid !== normalizedRedeemerUid) {
+      throw new RedemptionError(403, '该兑换码已绑定其他 Linux DO 用户')
+    }
+
+    if (reservedForOrderNo) {
+      const orderResult = db.exec(
         `
-          SELECT status, paid_at, refunded_at, scene
-          FROM credit_orders
+          SELECT status, email, refunded_at, order_type
+          FROM purchase_orders
           WHERE order_no = ?
           LIMIT 1
         `,
         [reservedForOrderNo]
       )
-      const creditRow = creditOrderResult[0]?.values?.[0]
-      if (!creditRow) {
-        throw new RedemptionError(403, '该兑换码绑定的订单不存在或已失效')
-      }
 
-      const creditStatus = String(creditRow[0] || '')
-      const paidAt = creditRow[1]
-      const refundedAt = creditRow[2]
-      const scene = String(creditRow[3] || '')
+      const orderRow = orderResult[0]?.values?.[0]
+      if (orderRow) {
+        const orderStatus = String(orderRow[0] || '')
+        const orderEmail = normalizeEmail(orderRow[1])
+        const refundedAt = orderRow[2]
+        const orderTypeFromOrder = orderRow[3]
+        if (orderTypeFromOrder != null && String(orderTypeFromOrder).trim()) {
+          resolvedOrderType = normalizeOrderType(orderTypeFromOrder)
+        }
 
-      if (scene && scene !== 'open_accounts_board') {
-        throw new RedemptionError(403, '该兑换码绑定的订单不可用于兑换')
-      }
+        if (refundedAt || orderStatus === 'refunded') {
+          throw new RedemptionError(403, '该订单已退款，兑换码已失效')
+        }
 
-      if (refundedAt || creditStatus === 'refunded') {
-        throw new RedemptionError(403, '该订单已退款，兑换码已失效')
-      }
+        if (orderStatus !== 'paid') {
+          throw new RedemptionError(403, '该兑换码对应订单未完成支付')
+        }
 
-      if (creditStatus !== 'paid' && !paidAt) {
-        throw new RedemptionError(403, '该兑换码对应订单未完成支付')
-      }
+        if (reservedForOrderEmail && reservedForOrderEmail !== normalizeEmail(normalizedEmail)) {
+          throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
+        }
 
-      if (reservedForOrderEmail && reservedForOrderEmail !== normalizeEmail(normalizedEmail)) {
-        throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
+        if (orderEmail && orderEmail !== normalizeEmail(normalizedEmail)) {
+          throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
+        }
+      } else {
+        const creditOrderResult = db.exec(
+          `
+            SELECT status, paid_at, refunded_at, scene
+            FROM credit_orders
+            WHERE order_no = ?
+            LIMIT 1
+          `,
+          [reservedForOrderNo]
+        )
+        const creditRow = creditOrderResult[0]?.values?.[0]
+        if (!creditRow) {
+          throw new RedemptionError(403, '该兑换码绑定的订单不存在或已失效')
+        }
+
+        const creditStatus = String(creditRow[0] || '')
+        const paidAt = creditRow[1]
+        const refundedAt = creditRow[2]
+        const scene = String(creditRow[3] || '')
+
+        if (scene && scene !== 'open_accounts_board') {
+          throw new RedemptionError(403, '该兑换码绑定的订单不可用于兑换')
+        }
+
+        if (refundedAt || creditStatus === 'refunded') {
+          throw new RedemptionError(403, '该订单已退款，兑换码已失效')
+        }
+
+        if (creditStatus !== 'paid' && !paidAt) {
+          throw new RedemptionError(403, '该兑换码对应订单未完成支付')
+        }
+
+        if (reservedForOrderEmail && reservedForOrderEmail !== normalizeEmail(normalizedEmail)) {
+          throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
+        }
       }
     }
-  }
 
-  const mustUseUndemotedAccount = requestedChannel === 'xhs'
-    || (requestedChannel === 'xianyu' && !isNoWarrantyOrderType(resolvedOrderType))
-    || (Boolean(reservedForOrderNo) && !isAntiBanOrderType(resolvedOrderType))
+    const mustUseUndemotedAccount = requestedChannel === 'xhs'
+      || (requestedChannel === 'xianyu' && !isNoWarrantyOrderType(resolvedOrderType))
+      || (Boolean(reservedForOrderNo) && !isAntiBanOrderType(resolvedOrderType))
 
-  const mustUseDemotedAccount = requestedChannel === 'xianyu' && isNoWarrantyOrderType(resolvedOrderType)
+    const mustUseDemotedAccount = requestedChannel === 'xianyu' && isNoWarrantyOrderType(resolvedOrderType)
 
-  let accountResult
+    let accountResult
 
-  const maxSeats = Math.max(1, Number(capacityLimit) || 6)
+    const maxSeats = Math.max(1, Number(capacityLimit) || 6)
 
-  if (boundAccountEmail) {
-    accountResult = db.exec(`
-        SELECT id, email, token, user_count, chatgpt_account_id, oai_device_id,
-               COALESCE(is_demoted, 0) AS is_demoted
-        FROM gpt_accounts
-        WHERE email = ?
-          AND COALESCE(user_count, 0) + COALESCE(invite_count, 0) < ?
-      `, [boundAccountEmail, maxSeats])
+    if (boundAccountEmail) {
+      accountResult = db.exec(
+        `
+          SELECT id, email, token, user_count, chatgpt_account_id, oai_device_id,
+                 COALESCE(is_demoted, 0) AS is_demoted
+          FROM gpt_accounts
+          WHERE email = ?
+            AND COALESCE(user_count, 0) + COALESCE(invite_count, 0) < ?
+        `,
+        [boundAccountEmail, maxSeats]
+      )
 
-    if (accountResult.length === 0 || accountResult[0].values.length === 0) {
-      throw new RedemptionError(503, '该兑换码绑定的账号已达到人数上限，请联系管理员')
+      if (accountResult.length === 0 || accountResult[0].values.length === 0) {
+        throw new RedemptionError(503, '该兑换码绑定的账号已达到人数上限，请联系管理员')
+      }
+    } else {
+      accountResult = db.exec(
+        `
+          SELECT id, email, token, user_count, chatgpt_account_id, oai_device_id,
+                 COALESCE(is_demoted, 0) AS is_demoted
+          FROM gpt_accounts
+          WHERE COALESCE(user_count, 0) + COALESCE(invite_count, 0) < ?
+            ${mustUseUndemotedAccount ? 'AND COALESCE(is_demoted, 0) = 0' : ''}
+            ${mustUseDemotedAccount ? 'AND COALESCE(is_demoted, 0) = 1' : ''}
+            AND LENGTH(TRIM(COALESCE(token, ''))) > 0
+            AND LENGTH(TRIM(COALESCE(chatgpt_account_id, ''))) > 0
+          ORDER BY COALESCE(user_count, 0) + COALESCE(invite_count, 0) ASC, RANDOM()
+          LIMIT 1
+        `,
+        [maxSeats]
+      )
+
+      if (accountResult.length === 0 || accountResult[0].values.length === 0) {
+        throw new RedemptionError(
+          503,
+          mustUseDemotedAccount
+            ? '暂无可用已降级账号，请稍后再试或联系管理员'
+            : '暂无可用账号，请稍后再试或联系管理员'
+        )
+      }
     }
-  } else {
-    accountResult = db.exec(`
-        SELECT id, email, token, user_count, chatgpt_account_id, oai_device_id,
-               COALESCE(is_demoted, 0) AS is_demoted
-        FROM gpt_accounts
-        WHERE COALESCE(user_count, 0) + COALESCE(invite_count, 0) < ?
-          ${mustUseUndemotedAccount ? 'AND COALESCE(is_demoted, 0) = 0' : ''}
-          ${mustUseDemotedAccount ? 'AND COALESCE(is_demoted, 0) = 1' : ''}
-        ORDER BY COALESCE(user_count, 0) + COALESCE(invite_count, 0) ASC, RANDOM()
-        LIMIT 1
-      `, [maxSeats])
 
-    if (accountResult.length === 0 || accountResult[0].values.length === 0) {
+    const account = accountResult[0].values[0]
+    const isAccountDemoted = Number(account[6] || 0) === 1
+    if (mustUseUndemotedAccount && isAccountDemoted) {
+      throw new RedemptionError(503, '该兑换码绑定的账号已降级，暂不可用，请联系管理员')
+    }
+    if (mustUseDemotedAccount && !isAccountDemoted) {
+      throw new RedemptionError(503, '无质保订单需要使用已降级账号的兑换码，请联系管理员')
+    }
+    const accountId = account[0]
+    const accountEmail = account[1]
+    const accountToken = String(account[2] || '').trim()
+    const currentUserCount = account[3] || 0
+    const chatgptAccountId = String(account[4] || '').trim()
+    const oaiDeviceId = account[5]
+
+    if (!chatgptAccountId || !accountToken) {
       throw new RedemptionError(
         503,
-        mustUseDemotedAccount
-          ? '暂无可用已降级账号，请稍后再试或联系管理员'
-          : '暂无可用账号，请稍后再试或联系管理员'
+        boundAccountEmail ? '该兑换码绑定账号缺少有效认证信息，请联系管理员更换' : '暂无可用账号，请稍后再试或联系管理员'
       )
     }
-  }
 
-  const account = accountResult[0].values[0]
-  const isAccountDemoted = Number(account[6] || 0) === 1
-  if (mustUseUndemotedAccount && isAccountDemoted) {
-    throw new RedemptionError(503, '该兑换码绑定的账号已降级，暂不可用，请联系管理员')
-  }
-  if (mustUseDemotedAccount && !isAccountDemoted) {
-    throw new RedemptionError(503, '无质保订单需要使用已降级账号的兑换码，请联系管理员')
-  }
-  const accountId = account[0]
-  const accountEmail = account[1]
-  const accountToken = account[2]
-  const currentUserCount = account[3] || 0
-  const chatgptAccountId = account[4]
-  const oaiDeviceId = account[5]
-  const accountData = {
-    token: accountToken,
-    chatgpt_account_id: chatgptAccountId,
-    oai_device_id: oaiDeviceId
-  }
-
-  try {
-    const updates = [
-      'is_redeemed = 1',
-      "redeemed_at = DATETIME('now', 'localtime')",
-      'redeemed_by = ?',
-      'order_type = ?',
-      "updated_at = DATETIME('now', 'localtime')",
-    ]
-    const updateParams = [redeemerIdentifier, resolvedOrderType]
-
-    if (fallbackFromCommonChannelAllowed && codeChannel !== requestedChannel) {
-      updates.push('channel = ?')
-      updates.push('channel_name = ?')
-      updateParams.push(requestedChannel, getChannelName(requestedChannel))
+    const accountData = {
+      token: accountToken,
+      chatgpt_account_id: chatgptAccountId,
+      oai_device_id: oaiDeviceId
     }
 
-    db.run(
-      `UPDATE redemption_codes SET ${updates.join(', ')} WHERE id = ?`,
-      [...updateParams, codeId]
-    )
+    const inviteResult = await inviteUserToChatGPTTeam(normalizedEmail, accountData)
+    if (!inviteResult.success) {
+      const inviteError = String(inviteResult.error || '').trim()
+      throw new RedemptionError(502, inviteError ? `发送邀请失败：${inviteError}` : '发送邀请失败，请稍后重试')
+    }
 
-    if (requestedChannel === 'linux-do' && normalizedRedeemerUid) {
-      if (reservedForEntryId) {
-        db.run(
-          `
+    try {
+      const updates = [
+        'is_redeemed = 1',
+        "redeemed_at = DATETIME('now', 'localtime')",
+        'redeemed_by = ?',
+        'order_type = ?',
+        "updated_at = DATETIME('now', 'localtime')",
+      ]
+      const updateParams = [redeemerIdentifier, resolvedOrderType]
+
+      if (fallbackFromCommonChannelAllowed && codeChannel !== requestedChannel) {
+        updates.push('channel = ?')
+        updates.push('channel_name = ?')
+        updateParams.push(requestedChannel, getChannelName(requestedChannel))
+      }
+
+      db.run(
+        `UPDATE redemption_codes SET ${updates.join(', ')} WHERE id = ?`,
+        [...updateParams, codeId]
+      )
+
+      if (requestedChannel === 'linux-do' && normalizedRedeemerUid) {
+        if (reservedForEntryId) {
+          db.run(
+            `
               UPDATE waiting_room_entries
               SET status = 'boarded',
                   boarded_at = DATETIME('now', 'localtime'),
                   updated_at = DATETIME('now', 'localtime')
               WHERE id = ?
             `,
-          [reservedForEntryId]
-        )
-      } else {
-        db.run(
-          `
+            [reservedForEntryId]
+          )
+        } else {
+          db.run(
+            `
               UPDATE waiting_room_entries
               SET status = 'boarded',
                   boarded_at = DATETIME('now', 'localtime'),
                   updated_at = DATETIME('now', 'localtime')
               WHERE linuxdo_uid = ? AND status = 'waiting'
             `,
-          [normalizedRedeemerUid]
-        )
-      }
-    }
-
-    saveDatabase()
-  } catch (error) {
-    console.error('更新数据库时出错:', error)
-    throw new RedemptionError(500, '兑换过程中出现错误，请重试')
-  }
-
-  let inviteResult = { success: false, message: '邀请功能未启用' }
-  let syncedAccount = null
-  let syncedUserCount = null
-  let syncedInviteCount = null
-
-  if (chatgptAccountId && accountToken) {
-    inviteResult = await inviteUserToChatGPTTeam(normalizedEmail, accountData)
-
-    if (!inviteResult.success) {
-      console.error(`邀请用户 ${normalizedEmail} 失败:`, inviteResult.error)
-    } else {
-      console.log(`成功邀请用户 ${normalizedEmail} 加入账号 ${chatgptAccountId}`)
-      try {
-        const userSync = await syncAccountUserCount(accountId, {
-          userListParams: { offset: 0, limit: 1, query: '' }
-        })
-        syncedAccount = userSync.account
-        if (typeof userSync.syncedUserCount === 'number') {
-          syncedUserCount = userSync.syncedUserCount
+            [normalizedRedeemerUid]
+          )
         }
-      } catch (error) {
-        console.warn('同步账号人数失败:', error)
       }
 
-      try {
-        const inviteSync = await syncAccountInviteCount(accountId, {
-          inviteListParams: { offset: 0, limit: 1, query: '' }
-        })
-        syncedAccount = inviteSync.account || syncedAccount
-        if (typeof inviteSync.inviteCount === 'number') {
-          syncedInviteCount = inviteSync.inviteCount
-        }
-      } catch (error) {
-        console.warn('同步邀请数量失败:', error)
+      saveDatabase()
+    } catch (error) {
+      console.error('更新数据库时出错:', error)
+      throw new RedemptionError(500, '兑换过程中出现错误，请重试')
+    }
+
+    let syncedAccount = null
+    let syncedUserCount = null
+    let syncedInviteCount = null
+
+    try {
+      const userSync = await syncAccountUserCount(accountId, {
+        userListParams: { offset: 0, limit: 1, query: '' }
+      })
+      syncedAccount = userSync.account
+      if (typeof userSync.syncedUserCount === 'number') {
+        syncedUserCount = userSync.syncedUserCount
+      }
+    } catch (error) {
+      console.warn('同步账号人数失败:', error)
+    }
+
+    try {
+      const inviteSync = await syncAccountInviteCount(accountId, {
+        inviteListParams: { offset: 0, limit: 1, query: '' }
+      })
+      syncedAccount = inviteSync.account || syncedAccount
+      if (typeof inviteSync.inviteCount === 'number') {
+        syncedInviteCount = inviteSync.inviteCount
+      }
+    } catch (error) {
+      console.warn('同步邀请数量失败:', error)
+    }
+
+    const resolvedUserCount = typeof syncedAccount?.userCount === 'number'
+      ? syncedAccount.userCount
+      : typeof syncedUserCount === 'number'
+        ? syncedUserCount
+        : currentUserCount
+    const resolvedInviteCount = typeof syncedAccount?.inviteCount === 'number'
+      ? syncedAccount.inviteCount
+      : typeof syncedInviteCount === 'number'
+        ? syncedInviteCount
+        : null
+
+    return {
+      data: {
+        accountEmail: accountEmail,
+        userCount: resolvedUserCount,
+        inviteStatus: '邀请已发送',
+        inviteDetails: inviteResult.response,
+        message: '您已成功加入 GPT team账号，邀请邮件已发送至您的邮箱',
+        inviteCount: resolvedInviteCount
+      },
+      metadata: {
+        codeId,
+        code: sanitizedCode,
+        requestedChannel,
+        accountEmail,
+        accountId
       }
     }
-  } else {
-    console.log(`账号 ${accountEmail} 缺少 ChatGPT 认证信息，跳过邀请步骤`)
-  }
-
-  const resolvedUserCount = typeof syncedAccount?.userCount === 'number'
-    ? syncedAccount.userCount
-    : typeof syncedUserCount === 'number'
-      ? syncedUserCount
-      : currentUserCount
-  const resolvedInviteCount = typeof syncedAccount?.inviteCount === 'number'
-    ? syncedAccount.inviteCount
-    : typeof syncedInviteCount === 'number'
-      ? syncedInviteCount
-      : null
-
-  return {
-    data: {
-      accountEmail: accountEmail,
-      userCount: resolvedUserCount,
-      inviteStatus: inviteResult.success ? '邀请已发送' : '邀请未发送（需要手动添加）',
-      inviteDetails: inviteResult.success ? inviteResult.response : inviteResult.error,
-      message: `您已成功加入 GPT team账号${inviteResult.success ? '，邀请邮件已发送至您的邮箱' : '，请联系管理员手动添加'}`,
-      inviteCount: resolvedInviteCount
-    },
-    metadata: {
-      codeId,
-      code: sanitizedCode,
-      requestedChannel,
-      accountEmail,
-      accountId
-    }
-  }
+  })
 }
 
 // 获取兑换码（支持可选分页）

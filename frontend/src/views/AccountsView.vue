@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { authService, gptAccountService, openaiOAuthService, userService, type GptAccount, type CreateGptAccountDto, type SyncUserCountResponse, type GptAccountsListParams, type ChatgptAccountInviteItem, type ChatgptAccountCheckInfo, type OpenAIOAuthSession, type OpenAIOAuthExchangeResult } from '@/services/api'
+import { authService, gptAccountService, openaiOAuthService, userService, type GptAccount, type CreateGptAccountDto, type SyncUserCountResponse, type GptAccountsListParams, type ChatgptAccountInviteItem, type ChatgptAccountCheckInfo, type OpenAIOAuthSession, type OpenAIOAuthExchangeResult, type BatchImportGptAccountsResponse } from '@/services/api'
 import { formatShanghaiDate } from '@/lib/datetime'
 import { useAppConfigStore } from '@/stores/appConfig'
 import {
@@ -28,15 +28,20 @@ import {
 } from '@/components/ui/dialog'
 import { useToast } from '@/components/ui/toast'
 import AppleNativeDateTimeInput from '@/components/ui/apple/NativeDateTimeInput.vue'
-import { Plus, Eye, EyeOff, RefreshCw, Ban, FilePenLine, Trash2, AlertTriangle, X, FolderOpen, Search } from 'lucide-vue-next'
+import { Plus, Eye, EyeOff, RefreshCw, Ban, FilePenLine, Trash2, AlertTriangle, X, FolderOpen, Search, FileUp } from 'lucide-vue-next'
 
 const router = useRouter()
 const accounts = ref<GptAccount[]>([])
 const loading = ref(true)
 const error = ref('')
 const showDialog = ref(false)
+const showBatchImportDialog = ref(false)
 const editingAccount = ref<GptAccount | null>(null)
 const paginationMeta = ref({ page: 1, pageSize: 10, total: 0 })
+const batchImportText = ref('')
+const batchImportError = ref('')
+const batchImporting = ref(false)
+const batchImportResult = ref<BatchImportGptAccountsResponse | null>(null)
 
 // 搜索和筛选状态
 const searchQuery = ref('')
@@ -76,6 +81,12 @@ onUnmounted(() => {
 
 // 计算总页数
 const totalPages = computed(() => Math.max(1, Math.ceil(paginationMeta.value.total / paginationMeta.value.pageSize)))
+const batchImportLineCount = computed(() =>
+  String(batchImportText.value || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean).length
+)
 
 // 同步相关状态
 const syncingAccountId = ref<number | null>(null)
@@ -587,6 +598,60 @@ const closeDialog = () => {
   resetOpenaiOAuthFlow()
 }
 
+const openBatchImportDialog = () => {
+  batchImportText.value = ''
+  batchImportError.value = ''
+  batchImportResult.value = null
+  showBatchImportDialog.value = true
+}
+
+const closeBatchImportDialog = () => {
+  showBatchImportDialog.value = false
+  batchImportError.value = ''
+  batchImporting.value = false
+}
+
+const handleBatchImportSubmit = async () => {
+  const rawText = String(batchImportText.value || '').trim()
+  if (!rawText) {
+    batchImportError.value = '请先粘贴 Access Token 列表'
+    showErrorToast(batchImportError.value)
+    return
+  }
+
+  if (batchImportLineCount.value > 500) {
+    batchImportError.value = '超过最大行数限制（500 行），请拆分后分批导入'
+    showErrorToast(batchImportError.value)
+    return
+  }
+
+  try {
+    batchImporting.value = true
+    batchImportError.value = ''
+    batchImportResult.value = null
+
+    const result = await gptAccountService.batchImport(rawText)
+    batchImportResult.value = result
+
+    const summary = result?.summary
+    if (!summary) {
+      showWarningToast('批量导入已完成，但未返回汇总信息')
+    } else if (summary.failed > 0) {
+      showWarningToast(`批量导入完成：新增 ${summary.created}，更新 ${summary.updated}，失败 ${summary.failed}`)
+    } else {
+      showSuccessToast(`批量导入成功：新增 ${summary.created}，更新 ${summary.updated}`)
+    }
+
+    await loadAccounts()
+  } catch (err: any) {
+    const message = err?.response?.data?.error || '批量导入失败'
+    batchImportError.value = message
+    showErrorToast(message)
+  } finally {
+    batchImporting.value = false
+  }
+}
+
 const handleSubmit = async () => {
   try {
     const payload: CreateGptAccountDto = {
@@ -937,6 +1002,15 @@ const handleInviteSubmit = async () => {
           刷新
         </Button>
         <Button
+          variant="outline"
+          class="bg-white border-gray-200 text-gray-700 hover:bg-gray-50 h-10 rounded-xl px-4"
+          :disabled="loading"
+          @click="openBatchImportDialog"
+        >
+          <FileUp class="w-4 h-4 mr-2" />
+          批量导入
+        </Button>
+        <Button
           @click="showDialog = true"
           class="bg-black hover:bg-gray-800 text-white rounded-xl px-5 h-10 shadow-lg shadow-black/10 transition-all hover:scale-[1.02] active:scale-[0.98]"
         >
@@ -1247,6 +1321,146 @@ const handleInviteSubmit = async () => {
         </div>
       </div>
     </div>
+
+    <!-- Batch Import Dialog -->
+    <Dialog v-model:open="showBatchImportDialog">
+      <DialogContent class="sm:max-w-[920px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl max-h-[90vh] flex flex-col">
+        <DialogHeader class="px-8 pt-8 pb-4 shrink-0">
+          <DialogTitle class="text-2xl font-bold text-gray-900">批量导入账号</DialogTitle>
+          <p class="text-sm text-gray-500">每行粘贴一条 Access Token，系统会自动解析并逐条导入。</p>
+        </DialogHeader>
+
+        <div class="flex-1 min-h-0 px-8 pb-6 space-y-4 overflow-y-auto">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between gap-3">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Access Token 列表</Label>
+              <span class="text-[12px] text-gray-400">已识别 {{ batchImportLineCount }} 行（最多 500 行）</span>
+            </div>
+            <textarea
+              v-model="batchImportText"
+              rows="8"
+              placeholder="每行一条 token，例如：&#10;eyJhbGciOi...&#10;eyJhbGciOi..."
+              class="w-full min-h-[180px] rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm font-mono leading-6 text-gray-800 outline-none transition-all focus:bg-white focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+            ></textarea>
+            <p class="text-[12px] text-gray-400">支持直接粘贴 token，或粘贴包含 token 的整行文本（系统会自动提取 JWT）。</p>
+            <p v-if="batchImportLineCount > 500" class="text-[12px] text-red-600">超过最大行数限制，请拆分后分批导入。</p>
+            <p v-if="batchImportError" class="text-[12px] text-red-600">{{ batchImportError }}</p>
+          </div>
+
+          <div v-if="batchImportResult?.summary" class="grid grid-cols-2 md:grid-cols-6 gap-2">
+            <div class="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2">
+              <p class="text-[11px] text-gray-500 uppercase tracking-wider">总行数</p>
+              <p class="text-lg font-semibold text-gray-900">{{ batchImportResult.summary.totalLines }}</p>
+            </div>
+            <div class="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2">
+              <p class="text-[11px] text-gray-500 uppercase tracking-wider">已处理</p>
+              <p class="text-lg font-semibold text-gray-900">{{ batchImportResult.summary.processed }}</p>
+            </div>
+            <div class="rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2">
+              <p class="text-[11px] text-emerald-600 uppercase tracking-wider">新增</p>
+              <p class="text-lg font-semibold text-emerald-700">{{ batchImportResult.summary.created }}</p>
+            </div>
+            <div class="rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2">
+              <p class="text-[11px] text-blue-600 uppercase tracking-wider">更新</p>
+              <p class="text-lg font-semibold text-blue-700">{{ batchImportResult.summary.updated }}</p>
+            </div>
+            <div class="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2">
+              <p class="text-[11px] text-amber-600 uppercase tracking-wider">跳过</p>
+              <p class="text-lg font-semibold text-amber-700">{{ batchImportResult.summary.skipped }}</p>
+            </div>
+            <div class="rounded-xl border border-red-100 bg-red-50/70 px-3 py-2">
+              <p class="text-[11px] text-red-600 uppercase tracking-wider">失败</p>
+              <p class="text-lg font-semibold text-red-700">{{ batchImportResult.summary.failed }}</p>
+            </div>
+          </div>
+
+          <div v-if="batchImportResult?.results?.length" class="space-y-2">
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-wider">导入明细</p>
+            <div class="rounded-xl border border-gray-100 overflow-auto max-h-[320px]">
+              <table class="w-full text-sm">
+                <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+                  <tr>
+                    <th class="px-3 py-2 text-left font-medium">行号</th>
+                    <th class="px-3 py-2 text-left font-medium">状态</th>
+                    <th class="px-3 py-2 text-left font-medium">邮箱 / 账号</th>
+                    <th class="px-3 py-2 text-left font-medium">结果</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-50">
+                  <tr v-for="item in batchImportResult.results" :key="`${item.line}-${item.status}-${item.accountId || ''}`" class="hover:bg-gray-50/60">
+                    <td class="px-3 py-2 text-gray-500">{{ item.line }}</td>
+                    <td class="px-3 py-2">
+                      <span
+                        class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium"
+                        :class="
+                          item.status === 'created'
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : item.status === 'updated'
+                              ? 'bg-blue-50 text-blue-700'
+                              : item.status === 'skipped'
+                                ? 'bg-amber-50 text-amber-700'
+                                : 'bg-red-50 text-red-700'
+                        "
+                      >
+                        {{
+                          item.status === 'created'
+                            ? '新增'
+                            : item.status === 'updated'
+                              ? '更新'
+                              : item.status === 'skipped'
+                                ? '跳过'
+                                : '失败'
+                        }}
+                      </span>
+                    </td>
+                    <td class="px-3 py-2 text-xs text-gray-600">
+                      <div class="space-y-0.5">
+                        <p>{{ item.email || '-' }}</p>
+                        <p class="text-gray-400 font-mono">{{ item.chatgptAccountId || '-' }}</p>
+                      </div>
+                    </td>
+                    <td class="px-3 py-2 text-xs">
+                      <div class="space-y-1">
+                        <p v-if="item.error" class="text-red-600">{{ item.error }}</p>
+                        <p v-else class="text-gray-700">{{ item.message || '-' }}</p>
+                        <p v-if="item.generatedCodes != null" class="text-gray-500">生成兑换码：{{ item.generatedCodes }}</p>
+                        <p v-if="item.warnings?.length" class="text-amber-600">{{ item.warnings.join('；') }}</p>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter class="px-8 pb-8 pt-4 shrink-0 border-t border-gray-100 bg-white/80 backdrop-blur">
+          <Button
+            type="button"
+            variant="ghost"
+            class="rounded-xl h-11 px-6 text-gray-500 hover:text-gray-900 hover:bg-gray-100"
+            :disabled="batchImporting"
+            @click="closeBatchImportDialog"
+          >
+            关闭
+          </Button>
+          <Button
+            type="button"
+            class="rounded-xl h-11 px-6 bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-200"
+            :disabled="batchImporting || batchImportLineCount === 0 || batchImportLineCount > 500"
+            @click="handleBatchImportSubmit"
+          >
+            <template v-if="batchImporting">
+              <span class="animate-spin w-4 h-4 border-2 border-current border-t-transparent rounded-full mr-2"></span>
+              导入中
+            </template>
+            <template v-else>
+              开始导入
+            </template>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- Edit Dialog -->
     <Dialog v-model:open="showDialog">

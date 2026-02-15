@@ -10,6 +10,7 @@ const router = express.Router()
 const OPENAI_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 
 const normalizeEmail = (value) => String(value ?? '').trim().toLowerCase()
+const normalizeAccessToken = (value) => String(value ?? '').trim().replace(/^Bearer\s+/i, '')
 
 const normalizeBoolean = (value) => {
   if (typeof value === 'boolean') return value
@@ -78,6 +79,104 @@ const collectEmails = (payload) => {
   if (typeof payload.emails === 'string') return [payload.emails]
   if (typeof payload.email === 'string') return [payload.email]
   return []
+}
+
+const IMPORT_MAX_LINES = 500
+const IMPORT_FALLBACK_EMAIL_DOMAIN = 'token-import.local'
+const JWT_TOKEN_PATTERN = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+const extractAccessTokenFromLine = (line) => {
+  const normalizedLine = String(line ?? '').trim()
+  if (!normalizedLine) return ''
+
+  const directToken = normalizeAccessToken(normalizedLine)
+  const directMatch = directToken.match(JWT_TOKEN_PATTERN)
+  if (directMatch?.[0]) {
+    return normalizeAccessToken(directMatch[0])
+  }
+
+  const tokenMatch = normalizedLine.match(JWT_TOKEN_PATTERN)
+  return tokenMatch?.[0] ? normalizeAccessToken(tokenMatch[0]) : ''
+}
+
+const decodeJwtPayload = (token) => {
+  const raw = normalizeAccessToken(token)
+  if (!raw) return null
+  const parts = raw.split('.')
+  if (parts.length < 2) return null
+  const payload = parts[1]
+  if (!payload) return null
+  try {
+    const padded = payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payload.length / 4) * 4, '=')
+    const decoded = Buffer.from(padded, 'base64').toString('utf8')
+    return JSON.parse(decoded)
+  } catch {
+    return null
+  }
+}
+
+const deriveExpireAtFromToken = (token) => {
+  const payload = decodeJwtPayload(token)
+  if (!payload || typeof payload !== 'object') return null
+  const exp = Number(payload.exp)
+  if (!Number.isFinite(exp) || exp <= 0) return null
+  const date = new Date(exp * 1000)
+  if (Number.isNaN(date.getTime())) return null
+  return formatExpireAt(date)
+}
+
+const extractEmailFromToken = (token) => {
+  const payload = decodeJwtPayload(token)
+  if (!payload || typeof payload !== 'object') return ''
+
+  const profile = payload['https://api.openai.com/profile']
+  const auth = payload['https://api.openai.com/auth']
+  const candidates = [
+    profile?.email,
+    auth?.email,
+    payload.email,
+    payload.upn,
+    payload.preferred_username
+  ]
+
+  for (const candidate of candidates) {
+    const normalized = normalizeEmail(candidate)
+    if (EMAIL_REGEX.test(normalized)) {
+      return normalized
+    }
+  }
+
+  return ''
+}
+
+const isFallbackImportEmail = (email) => {
+  const normalized = normalizeEmail(email)
+  return normalized.endsWith(`@${IMPORT_FALLBACK_EMAIL_DOMAIN}`)
+}
+
+const buildFallbackImportEmail = (chatgptAccountId) => {
+  const normalizedAccountId = String(chatgptAccountId ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  const localPart = (normalizedAccountId || `acct-${Date.now().toString(36)}`).slice(0, 48)
+  return `${localPart}@${IMPORT_FALLBACK_EMAIL_DOMAIN}`
+}
+
+const pickPreferredTeamAccount = (accounts) => {
+  const list = Array.isArray(accounts) ? accounts : []
+  if (!list.length) return null
+  return list.find(item => Boolean(item?.hasActiveSubscription)) || list[0]
+}
+
+const resolveImportErrorMessage = (error) => {
+  if (error instanceof AccountSyncError) return error.message
+  if (error?.status && error?.message) return error.message
+  if (typeof error?.message === 'string' && error.message.trim()) return error.message
+  return '导入失败'
 }
 
 // 使用系统设置中的 API 密钥（x-api-key）标记账号为“封号”
@@ -161,6 +260,271 @@ router.post('/check-token', async (req, res) => {
       return res.status(error.status || 500).json({ error: error.message })
     }
 
+    return res.status(500).json({ error: '内部服务器错误' })
+  }
+})
+
+// 批量导入 GPT 账号（每行一个 access token）
+router.post('/batch-import', async (req, res) => {
+  try {
+    const body = req.body || {}
+    const tokensText = String(body.tokensText ?? body.content ?? '').trim()
+
+    if (!tokensText) {
+      return res.status(400).json({ error: 'tokensText is required' })
+    }
+
+    const parsedLines = String(tokensText)
+      .split(/\r?\n/)
+      .map((line, index) => ({
+        line: index + 1,
+        raw: String(line ?? '').trim()
+      }))
+      .filter(item => item.raw)
+
+    if (!parsedLines.length) {
+      return res.status(400).json({ error: '未检测到可导入的 token 行' })
+    }
+
+    if (parsedLines.length > IMPORT_MAX_LINES) {
+      return res.status(400).json({ error: `批量导入最多支持 ${IMPORT_MAX_LINES} 行` })
+    }
+
+    const db = await getDatabase()
+    const seenTokenLineMap = new Map()
+    const results = []
+
+    const summary = {
+      totalLines: parsedLines.length,
+      processed: 0,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      skipped: 0
+    }
+
+    let hasDatabaseChange = false
+
+    for (const item of parsedLines) {
+      const { line, raw } = item
+      const normalizedToken = extractAccessTokenFromLine(raw)
+
+      if (!normalizedToken) {
+        summary.failed += 1
+        results.push({
+          line,
+          status: 'failed',
+          error: '未检测到有效的 access token'
+        })
+        continue
+      }
+
+      const firstLine = seenTokenLineMap.get(normalizedToken)
+      if (firstLine) {
+        summary.skipped += 1
+        results.push({
+          line,
+          status: 'skipped',
+          message: `与第 ${firstLine} 行 token 重复，已跳过`
+        })
+        continue
+      }
+      seenTokenLineMap.set(normalizedToken, line)
+
+      try {
+        const checkedAccounts = await fetchOpenAiAccountInfo(normalizedToken)
+        const selectedAccount = pickPreferredTeamAccount(checkedAccounts)
+        const normalizedChatgptAccountId = String(selectedAccount?.accountId ?? '').trim()
+
+        if (!normalizedChatgptAccountId) {
+          throw new AccountSyncError('未找到可用的 Team 账号', 404)
+        }
+
+        const derivedExpireAt = deriveExpireAtFromToken(normalizedToken)
+        const derivedEmail = extractEmailFromToken(normalizedToken)
+        const warnings = []
+        let normalizedEmailForImport = derivedEmail
+
+        if (!normalizedEmailForImport) {
+          normalizedEmailForImport = buildFallbackImportEmail(normalizedChatgptAccountId)
+          warnings.push('未能从 token 解析邮箱，已使用系统占位邮箱')
+        }
+
+        const existingByAccountIdResult = db.exec(
+          `
+            SELECT id, email
+            FROM gpt_accounts
+            WHERE chatgpt_account_id = ?
+            LIMIT 1
+          `,
+          [normalizedChatgptAccountId]
+        )
+
+        let existingRow = existingByAccountIdResult?.[0]?.values?.[0] || null
+        if (!existingRow) {
+          const existingByEmailResult = db.exec(
+            `
+              SELECT id, email
+              FROM gpt_accounts
+              WHERE LOWER(email) = ?
+              LIMIT 1
+            `,
+            [normalizeEmail(normalizedEmailForImport)]
+          )
+          existingRow = existingByEmailResult?.[0]?.values?.[0] || null
+        }
+
+        const isDemotedValue = selectedAccount?.isDemoted ? 1 : 0
+
+        if (existingRow) {
+          const existingId = Number(existingRow[0])
+          const existingEmail = normalizeEmail(existingRow[1] || '')
+          const shouldKeepExistingEmail = !derivedEmail && existingEmail && !isFallbackImportEmail(existingEmail)
+          const nextEmail = shouldKeepExistingEmail ? existingEmail : normalizeEmail(normalizedEmailForImport)
+
+          db.run(
+            `
+              UPDATE gpt_accounts
+              SET email = ?,
+                  token = ?,
+                  chatgpt_account_id = ?,
+                  expire_at = CASE WHEN ? = 1 THEN ? ELSE expire_at END,
+                  is_demoted = ?,
+                  updated_at = DATETIME('now', 'localtime')
+              WHERE id = ?
+            `,
+            [nextEmail, normalizedToken, normalizedChatgptAccountId, derivedExpireAt ? 1 : 0, derivedExpireAt, isDemotedValue, existingId]
+          )
+
+          if (existingEmail && nextEmail !== existingEmail) {
+            db.run(
+              `UPDATE redemption_codes SET account_email = ?, updated_at = DATETIME('now', 'localtime') WHERE account_email = ?`,
+              [nextEmail, existingEmail]
+            )
+          }
+
+          hasDatabaseChange = true
+          summary.updated += 1
+          results.push({
+            line,
+            status: 'updated',
+            accountId: existingId,
+            email: nextEmail,
+            chatgptAccountId: normalizedChatgptAccountId,
+            message: '账号已更新',
+            warnings
+          })
+          continue
+        }
+
+        const finalUserCount = 1
+        const normalizedEmail = normalizeEmail(normalizedEmailForImport)
+
+        db.run(
+          `
+            INSERT INTO gpt_accounts (
+              email,
+              token,
+              refresh_token,
+              user_count,
+              chatgpt_account_id,
+              oai_device_id,
+              expire_at,
+              is_demoted,
+              is_banned,
+              created_at,
+              updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+          `,
+          [normalizedEmail, normalizedToken, null, finalUserCount, normalizedChatgptAccountId, null, derivedExpireAt, isDemotedValue, 0]
+        )
+
+        const createdResult = db.exec(
+          `
+            SELECT id
+            FROM gpt_accounts
+            WHERE id = last_insert_rowid()
+          `
+        )
+        const createdId = Number(createdResult?.[0]?.values?.[0]?.[0] || 0)
+
+        // 新账号自动生成兑换码，与单条创建逻辑保持一致
+        const totalCapacity = 5
+        const currentUserCountForCodes = Math.max(1, Number(finalUserCount) || 1)
+        const codesToGenerate = Math.max(0, totalCapacity - currentUserCountForCodes)
+        const generatedCodes = []
+
+        const generateRedemptionCode = (length = 12) => {
+          const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+          let code = ''
+          for (let i = 0; i < length; i++) {
+            code += chars.charAt(Math.floor(Math.random() * chars.length))
+            if ((i + 1) % 4 === 0 && i < length - 1) {
+              code += '-'
+            }
+          }
+          return code
+        }
+
+        for (let i = 0; i < codesToGenerate; i++) {
+          let code = generateRedemptionCode()
+          let attempts = 0
+          let success = false
+
+          while (attempts < 5 && !success) {
+            try {
+              db.run(
+                `INSERT INTO redemption_codes (code, account_email, created_at, updated_at) VALUES (?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`,
+                [code, normalizedEmail]
+              )
+              generatedCodes.push(code)
+              success = true
+            } catch (err) {
+              if (err.message.includes('UNIQUE')) {
+                code = generateRedemptionCode()
+                attempts += 1
+              } else {
+                throw err
+              }
+            }
+          }
+        }
+
+        hasDatabaseChange = true
+        summary.created += 1
+        results.push({
+          line,
+          status: 'created',
+          accountId: createdId || null,
+          email: normalizedEmail,
+          chatgptAccountId: normalizedChatgptAccountId,
+          generatedCodes: generatedCodes.length,
+          message: `账号创建成功，已自动生成${generatedCodes.length}个兑换码`,
+          warnings
+        })
+      } catch (error) {
+        summary.failed += 1
+        results.push({
+          line,
+          status: 'failed',
+          error: resolveImportErrorMessage(error)
+        })
+      }
+    }
+
+    summary.processed = summary.created + summary.updated + summary.failed + summary.skipped
+
+    if (hasDatabaseChange) {
+      saveDatabase()
+    }
+
+    return res.json({
+      message: '批量导入完成',
+      summary,
+      results
+    })
+  } catch (error) {
+    console.error('Batch import GPT accounts error:', error)
     return res.status(500).json({ error: '内部服务器错误' })
   }
 })

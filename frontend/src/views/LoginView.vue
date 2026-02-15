@@ -96,6 +96,11 @@ const handleLogin = async () => {
             没有账号？
             <router-link to="/register" class="text-gray-900 hover:underline">去注册</router-link>
           </div>
+
+          <div class="text-center text-sm text-gray-500 font-medium">
+            兑换码用户：
+            <router-link to="/redeem" class="text-gray-900 hover:underline">前往兑换</router-link>
+          </div>
         </form>
       </div>
       

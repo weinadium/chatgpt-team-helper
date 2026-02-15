@@ -1337,6 +1337,33 @@ export interface GptAccountsListResponse {
   }
 }
 
+export interface BatchImportGptAccountsSummary {
+  totalLines: number
+  processed: number
+  created: number
+  updated: number
+  failed: number
+  skipped: number
+}
+
+export interface BatchImportGptAccountResultItem {
+  line: number
+  status: 'created' | 'updated' | 'failed' | 'skipped'
+  accountId?: number | null
+  email?: string
+  chatgptAccountId?: string
+  generatedCodes?: number
+  message?: string
+  error?: string
+  warnings?: string[]
+}
+
+export interface BatchImportGptAccountsResponse {
+  message: string
+  summary: BatchImportGptAccountsSummary
+  results: BatchImportGptAccountResultItem[]
+}
+
 export const gptAccountService = {
   async getAll(params?: GptAccountsListParams): Promise<GptAccountsListResponse> {
     const response = await api.get('/gpt-accounts', { params })
@@ -1364,6 +1391,11 @@ export const gptAccountService = {
 
   async checkAccessToken(token: string): Promise<CheckGptAccessTokenResponse> {
     const response = await api.post('/gpt-accounts/check-token', { token })
+    return response.data
+  },
+
+  async batchImport(tokensText: string): Promise<BatchImportGptAccountsResponse> {
+    const response = await api.post('/gpt-accounts/batch-import', { tokensText })
     return response.data
   },
 
