@@ -92,6 +92,7 @@ const channelLabel = (channel: string) => {
   const normalized = String(channel || '').trim()
   const mapping: Record<string, string> = {
     common: '通用',
+    paypal: 'PayPal',
     'linux-do': 'Linux DO',
     xhs: '小红书',
     xianyu: '闲鱼',

@@ -31,7 +31,7 @@
 - **补号/账号恢复**：历史订单找回与重新兑换
 
 ### 订单管理
-- **支付订单**：Zpay 支付网关集成，支持多种商品类型（标准、无质保、防封禁）
+- **支付订单**：Zpay 支付网关集成，支持多种商品类型（标准、无质保）
 - **Credit 订单**：Linux DO Credit 支付网关集成
 - **小红书订单**：API 自动同步 + 手动导入，定时轮询
 - **闲鱼订单**：API 同步 + WebSocket 实时监听 + IM 自动发货
@@ -461,10 +461,10 @@ PURCHASE_NO_WARRANTY_PRODUCT_NAME=通用渠道激活码（无质保）
 PURCHASE_NO_WARRANTY_PRICE=5.00
 PURCHASE_NO_WARRANTY_SERVICE_DAYS=30
 
-# 防封禁商品
-PURCHASE_ANTI_BAN_PRODUCT_NAME=通用渠道激活码(防封禁)
-PURCHASE_ANTI_BAN_PRICE=10.00
-PURCHASE_ANTI_BAN_SERVICE_DAYS=30
+# 防封禁商品（已下线，配置已弃用）
+# PURCHASE_ANTI_BAN_PRODUCT_NAME=通用渠道激活码(防封禁)
+# PURCHASE_ANTI_BAN_PRICE=10.00
+# PURCHASE_ANTI_BAN_SERVICE_DAYS=30
 
 # 订单过期时间（分钟）
 PURCHASE_ORDER_EXPIRE_MINUTES=15

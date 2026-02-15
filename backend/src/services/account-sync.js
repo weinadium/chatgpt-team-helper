@@ -78,22 +78,21 @@ function mapRowToAccount(row) {
     oaiDeviceId: row[7],
     expireAt: row[8] || null,
     isOpen: Boolean(row[9]),
-    isDemoted: Boolean(row[10]),
-    isBanned: Boolean(row[11]),
-    createdAt: row[12],
-    updatedAt: row[13]
+    isDemoted: false,
+    isBanned: Boolean(row[10]),
+    createdAt: row[11],
+    updatedAt: row[12]
   }
 }
 
 async function fetchAccountById(db, accountId) {
   const result = db.exec(
     `
-    SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
-           COALESCE(is_demoted, 0) AS is_demoted,
-           COALESCE(is_banned, 0) AS is_banned,
-           created_at, updated_at
-    FROM gpt_accounts
-    WHERE id = ?
+	    SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+	           COALESCE(is_banned, 0) AS is_banned,
+	           created_at, updated_at
+	    FROM gpt_accounts
+	    WHERE id = ?
   `,
     [accountId]
   )
@@ -106,14 +105,13 @@ async function fetchAccountById(db, accountId) {
 }
 
 export async function fetchAllAccounts() {
-  const db = await getDatabase()
-  const result = db.exec(`
-    SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
-           COALESCE(is_demoted, 0) AS is_demoted,
-           COALESCE(is_banned, 0) AS is_banned,
-           created_at, updated_at
-    FROM gpt_accounts
-    ORDER BY created_at DESC
+	  const db = await getDatabase()
+	  const result = db.exec(`
+	    SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+	           COALESCE(is_banned, 0) AS is_banned,
+	           created_at, updated_at
+	    FROM gpt_accounts
+	    ORDER BY created_at DESC
   `)
 
   if (result.length === 0) {
@@ -332,20 +330,20 @@ export async function fetchOpenAiAccountInfo(token, proxy = null) {
     throw new AccountSyncError('未找到关联的 ChatGPT 账号', 404)
   }
 
-  // Only keep team accounts (for workspace invite/admin operations).
-  return accountIds
-    .map(id => {
-      const acc = accountsMap[id]
-      return {
-        accountId: id,
-        name: acc?.account?.name || 'Unnamed Team',
-        planType: acc?.account?.plan_type || null,
-        expiresAt: acc?.entitlement?.expires_at || null,
-        hasActiveSubscription: !!acc?.entitlement?.has_active_subscription,
-        isDemoted: acc?.account?.account_user_role !== 'account-owner'
-      }
-    })
-    .filter(acc => acc.planType === 'team')
+	  // Only keep team accounts (for workspace invite/admin operations).
+	  return accountIds
+	    .map(id => {
+	      const acc = accountsMap[id]
+	      return {
+	        accountId: id,
+	        name: acc?.account?.name || 'Unnamed Team',
+	        planType: acc?.account?.plan_type || null,
+	        expiresAt: acc?.entitlement?.expires_at || null,
+	        hasActiveSubscription: !!acc?.entitlement?.has_active_subscription,
+	        isDemoted: false
+	      }
+	    })
+	    .filter(acc => acc.planType === 'team')
 }
 
 const throwChatgptApiStatusError = async ({ status, errorText, logContext, label }) => {
